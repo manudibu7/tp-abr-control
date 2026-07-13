@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Simulador ABR — Lazo cerrado discreto (PD + zona muerta)</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root{
+    --bg:#0B1220; --panel:#101A2E; --panel2:#0E1728; --line:rgba(255,255,255,.08);
+    --txt:#E7EEF9; --muted:#8CA0BF; --accent:#39D0D8;
+    --buffer:#4DA3FF; --setpoint:#FF5C5C; --band:rgba(255,209,102,.10);
+    --bitrate:#FF9F40; --thr:#2ECC71; --uk:#B48CFF; --err:#FFD166;
+    --danger:#FF5C5C; --warn:#FFB020;
+  }
+  *{box-sizing:border-box; margin:0; padding:0}
+  body{
+    background:var(--bg); color:var(--txt);
+    font-family:"Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+    font-size:14px; min-height:100vh;
+  }
+  .mono{font-family:ui-monospace,"Cascadia Mono","JetBrains Mono",Consolas,monospace}
+  header{
+    display:flex; align-items:baseline; gap:14px; flex-wrap:wrap;
+    padding:16px 22px 10px; border-bottom:1px solid var(--line);
+  }
+  header h1{font-size:17px; font-weight:600; letter-spacing:.3px}
+  header .sub{color:var(--muted); font-size:12.5px}
+  .layout{display:grid; grid-template-columns:1fr 320px; gap:16px; padding:16px 22px 30px; max-width:1500px; margin:0 auto}
+  @media (max-width:1000px){ .layout{grid-template-columns:1fr} }
+
+  /* ---- columna de gráficos ---- */
+  .charts{display:flex; flex-direction:column; gap:12px; min-width:0}
+  .chartCard{background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px 14px 6px}
+  .chartCard h2{font-size:12px; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:4px}
+  .chartWrap{position:relative; height:170px}
+
+  /* ---- panel lateral ---- */
+  aside{display:flex; flex-direction:column; gap:12px}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px}
+  .card h3{font-size:12px; text-transform:uppercase; letter-spacing:1px; color:var(--muted); margin-bottom:10px}
+  .btnRow{display:flex; gap:8px}
+  button{
+    flex:1; padding:9px 6px; border:1px solid var(--line); border-radius:8px;
+    background:var(--panel2); color:var(--txt); cursor:pointer; font-size:13px; font-weight:600;
+    transition:filter .15s, border-color .15s;
+  }
+  button:hover{filter:brightness(1.25)}
+  button:disabled{opacity:.4; cursor:not-allowed}
+  #btnStart{border-color:var(--accent); color:var(--accent)}
+  #btnPause{border-color:var(--warn); color:var(--warn)}
+  #btnReset{border-color:var(--muted)}
+  .inject{margin-top:8px}
+  #btnNet{border-color:var(--thr); color:var(--thr)}
+  #btnCpu{border-color:var(--danger); color:var(--danger)}
+  .sl{margin-bottom:12px}
+  .sl label{display:flex; justify-content:space-between; font-size:12.5px; color:var(--muted); margin-bottom:4px}
+  .sl label b{color:var(--txt)}
+  input[type=range]{width:100%; accent-color:var(--accent)}
+  input[type=number]{
+    width:100%; background:var(--panel2); border:1px solid var(--line); border-radius:6px;
+    color:var(--txt); padding:6px 8px; font-size:13px;
+  }
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:10px}
+  .kpis{display:grid; grid-template-columns:1fr 1fr; gap:8px}
+  .kpi{background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:8px 10px}
+  .kpi .lab{font-size:10.5px; text-transform:uppercase; letter-spacing:.8px; color:var(--muted)}
+  .kpi .val{font-size:16px; font-weight:600; margin-top:2px}
+  .badge{
+    display:inline-block; padding:2px 10px; border-radius:20px; font-size:12px; font-weight:700;
+    background:rgba(77,163,255,.15); color:var(--buffer); border:1px solid rgba(77,163,255,.4);
+  }
+  #stateBadge.rebuf{background:rgba(255,92,92,.15); color:var(--danger); border-color:rgba(255,92,92,.5)}
+  #stateBadge.frozen{background:rgba(255,176,32,.15); color:var(--warn); border-color:rgba(255,176,32,.5)}
+  .pertMsg{font-size:12px; color:var(--warn); margin-top:8px; min-height:16px}
+  .speed{display:flex; gap:6px; margin-top:10px}
+  .speed button{padding:5px 0; font-size:12px}
+  .speed button.on{border-color:var(--accent); color:var(--accent)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Simulador ABR — Control PD digital con banda de aceptación</h1>
+  <span class="sub mono">T = 4 s &nbsp;|&nbsp; R = 10 s &nbsp;|&nbsp; e(k) = 10 − Buffer(k) &nbsp;|&nbsp; perfiles: 0.4 / 1.0 / 2.5 / 8.0 Mbps</span>
+</header>
+
+<div class="layout">
+  <div class="charts">
+    <div class="chartCard">
+      <h2>1 · Buffer Health [s] — set point y zona muerta</h2>
+      <div class="chartWrap"><canvas id="chBuf"></canvas></div>
+    </div>
+    <div class="chartCard">
+      <h2>2 · Velocidades [Mbps] — bitrate seleccionado vs throughput</h2>
+      <div class="chartWrap"><canvas id="chVel"></canvas></div>
+    </div>
+    <div class="chartCard">
+      <h2>3 · Señal de control u(k) y bitrate ideal continuo [Mbps]</h2>
+      <div class="chartWrap"><canvas id="chU"></canvas></div>
+    </div>
+    <div class="chartCard">
+      <h2>4 · Señal de error e(k) [s]</h2>
+      <div class="chartWrap"><canvas id="chE"></canvas></div>
+    </div>
+  </div>
+
+  <aside>
+    <div class="card">
+      <h3>Simulación</h3>
+      <div class="btnRow">
+        <button id="btnStart">▶ Iniciar</button>
+        <button id="btnPause" disabled>⏸ Pausar</button>
+        <button id="btnReset">↺ Reiniciar</button>
+      </div>
+      <div class="speed">
+        <button data-s="1" class="on">1×</button>
+        <button data-s="2">2×</button>
+        <button data-s="4">4×</button>
+        <button data-s="8">8×</button>
+      </div>
+      <div class="kpis" style="margin-top:12px">
+        <div class="kpi"><div class="lab">Tiempo</div><div class="val mono" id="kT">0 s</div></div>
+        <div class="kpi"><div class="lab">Buffer</div><div class="val mono" id="kBuf">10.0 s</div></div>
+        <div class="kpi"><div class="lab">Calidad</div><div class="val mono" id="kQ">720p</div></div>
+        <div class="kpi"><div class="lab">Estado</div><div class="val"><span class="badge" id="stateBadge">Reproduciendo</span></div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Controlador (en vivo)</h3>
+      <div class="sl">
+        <label><span>Kp (proporcional)</span><b class="mono" id="vKp">0.60</b></label>
+        <input type="range" id="sKp" min="0" max="3" step="0.05" value="0.6">
+      </div>
+      <div class="sl">
+        <label><span>Kd (derivativa)</span><b class="mono" id="vKd">0.30</b></label>
+        <input type="range" id="sKd" min="0" max="3" step="0.05" value="0.3">
+      </div>
+      <div class="sl">
+        <label><span>Zona muerta ± Δ</span><b class="mono" id="vDz">2.0 s</b></label>
+        <input type="range" id="sDz" min="0" max="6" step="0.25" value="2">
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Red en tiempo real</h3>
+      <div class="sl">
+        <label><span>Throughput base</span><b class="mono" id="vThr">12.0 Mbps</b></label>
+        <input type="range" id="sThr" min="0" max="25" step="0.5" value="12">
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Perturbaciones</h3>
+      <div class="grid2">
+        <div>
+          <label style="font-size:12px;color:var(--muted)">Duración [s]</label>
+          <input type="number" id="pDur" min="1" max="120" step="1" value="12">
+        </div>
+        <div>
+          <label style="font-size:12px;color:var(--muted)">Amplitud [%]</label>
+          <input type="number" id="pAmp" min="0" max="100" step="5" value="80">
+        </div>
+      </div>
+      <div class="btnRow inject">
+        <button id="btnNet">⚡ Perturbación de Red (externa)</button>
+      </div>
+      <div class="btnRow inject">
+        <button id="btnCpu">🧊 Falla de CPU (interna)</button>
+      </div>
+      <div class="pertMsg" id="pertMsg"></div>
+    </div>
+  </aside>
+</div>
+
+<script>
+"use strict";
+/* ================= Parámetros fijos del TP ================= */
+const T = 4;                 // período de muestreo / duración del segmento [s]
+const R = 10;                // set point de buffer [s]
+const BUFFER_MAX = 30;       // capacidad máxima del buffer [s]
+const PROFILES = [
+  {mbps:0.4, label:"240p"},
+  {mbps:1.0, label:"480p"},
+  {mbps:2.5, label:"720p"},
+  {mbps:8.0, label:"1080p"},
+];
+const WINDOW = 180;          // ventana visible de las series [s]
+
+/* ================= Estado de la simulación ================= */
+let st;
+function freshState(){
+  return {
+    t: 0,
+    buffer: R,               // arrancamos en el set point para observar régimen permanente
+    ePrev: 0,
+    u: 0,
+    bitrateIdeal: PROFILES[2].mbps,
+    profileIdx: 2,           // 720p inicial
+    rebuffering: false,
+    seg: null,               // {remainingMb}
+    // perturbaciones
+    netUntil: -1, netAmp: 0,
+    cpuUntil: -1,
+  };
+}
+
+/* ================= Parámetros vivos (sliders) ================= */
+const P = { kp:0.6, kd:0.3, dz:2.0, thrBase:12.0 };
+
+function throughputNow(){
+  if (st.t < st.netUntil) return Math.max(0, P.thrBase * (1 - st.netAmp/100));
+  return P.thrBase;
+}
+function playbackRateNow(){
+  return (st.t < st.cpuUntil) ? 0 : 1.0;
+}
+
+/* ================= Ley de control (decisión cada segmento) ================= */
+function controllerStep(){
+  const e = R - st.buffer;                       // e(k) = 10 − Buffer(k)
+  if (Math.abs(e) <= P.dz){
+    st.u = 0;                                    // dentro de la banda: error tratado como 0
+    // se mantiene el bitrate vigente (anti-zapateo)
+  } else {
+    st.u = P.kp * e + P.kd * (e - st.ePrev) / T; // PD digital
+    // Bitrate ideal continuo: la acción de control descuenta/agrega capacidad
+    // respecto del throughput estimado (e>0 → pedir menos que la red para rellenar buffer;
+    // e<0 → se habilita subir calidad).
+    const ideal = Math.max(0, throughputNow() - st.u);
+    st.bitrateIdeal = ideal;
+    // Actuador discreto: perfil más cercano HACIA ABAJO
+    let idx = 0;
+    for (let i = PROFILES.length - 1; i >= 0; i--){
+      if (PROFILES[i].mbps <= ideal){ idx = i; break; }
+    }
+    st.profileIdx = idx;
+  }
+  st.ePrev = e;
+}
+
+/* ================= Dinámica de la planta (1 s de tiempo simulado) ================= */
+function plantSecond(){
+  let budget = 1.0;
+  while (budget > 1e-9){
+    // Iniciar descarga de un nuevo segmento si no hay una en curso y hay lugar
+    if (!st.seg){
+      if (st.buffer <= BUFFER_MAX - T){
+        controllerStep();
+        st.seg = { remainingMb: PROFILES[st.profileIdx].mbps * T };
+      } else {
+        // buffer lleno: sólo consumo
+        const dt = budget;
+        consume(dt);
+        budget = 0;
+        break;
+      }
+    }
+    const thr = throughputNow();
+    let dt;
+    if (thr <= 1e-9){
+      dt = budget;                       // red caída: no avanza la descarga
+      consume(dt);
+      budget -= dt;
+    } else {
+      const tFin = st.seg.remainingMb / thr;
+      dt = Math.min(budget, tFin);
+      st.seg.remainingMb -= thr * dt;
+      consume(dt);
+      budget -= dt;
+      if (st.seg.remainingMb <= 1e-9){
+        st.buffer = Math.min(BUFFER_MAX, st.buffer + T);  // Buffer(k+1) = Buffer(k) + T − Td·PR
+        st.seg = null;
+        if (st.buffer > 0) st.rebuffering = false;         // fin del re-buffering
+      }
+    }
+  }
+  st.t += 1;
+}
+function consume(dt){
+  const pr = playbackRateNow();
+  if (st.rebuffering || pr <= 0) return;   // reproducción detenida
+  st.buffer = Math.max(0, st.buffer - pr * dt);
+  if (st.buffer <= 1e-9){ st.buffer = 0; st.rebuffering = true; }
+}
+
+/* ================= Chart.js: 4 gráficos alineados ================= */
+Chart.defaults.color = "#8CA0BF";
+Chart.defaults.font.family = "ui-monospace, Consolas, monospace";
+Chart.defaults.font.size = 11;
+
+const AXIS_W = 58;
+const AXIS_R = 52;   // ancho reservado a la derecha para mantener alineados los 4 ejes X
+function baseOpts(yTitle, yMin, yMax){
+  return {
+    responsive:true, maintainAspectRatio:false, animation:false,
+    layout:{padding:{right:AXIS_R}},
+    interaction:{mode:"index", intersect:false},
+    plugins:{
+      legend:{labels:{boxWidth:14, boxHeight:2, font:{size:11}}},
+      tooltip:{enabled:true},
+    },
+    scales:{
+      x:{type:"linear", min:0, max:WINDOW, grid:{color:"rgba(255,255,255,.05)"},
+         ticks:{stepSize:20, callback:v=>v+"s"}},
+      y:{title:{display:true, text:yTitle}, min:yMin, max:yMax,
+         grid:{color:"rgba(255,255,255,.05)"},
+         afterFit:(s)=>{s.width = AXIS_W;}},
+    },
+    elements:{point:{radius:0}, line:{borderWidth:2}},
+  };
+}
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+const chBuf = new Chart(document.getElementById("chBuf"), {
+  type:"line",
+  data:{datasets:[
+    {label:"Zona muerta (sup)", data:[], borderWidth:0, backgroundColor:css("--band"), fill:"+1", pointRadius:0, order:10},
+    {label:"Zona muerta (inf)", data:[], borderWidth:0, fill:false, pointRadius:0, order:10},
+    {label:"Set point (10 s)", data:[], borderColor:css("--setpoint"), borderDash:[6,5], borderWidth:1.6},
+    {label:"Buffer real", data:[], borderColor:css("--buffer"), tension:.15},
+  ]},
+  options:(()=>{ const o = baseOpts("segundos", 0, 30);
+    o.plugins.legend.labels.filter = it => !it.text.startsWith("Zona muerta (inf");
+    return o; })(),
+});
+const chVel = new Chart(document.getElementById("chVel"), {
+  type:"line",
+  data:{datasets:[
+    {label:"Throughput disponible", data:[], borderColor:css("--thr"), borderDash:[6,5], borderWidth:1.8},
+    {label:"Bitrate seleccionado", data:[], borderColor:css("--bitrate"), stepped:true},
+  ]},
+  options:(()=>{ const o = baseOpts("Mbps", 0, 26);
+    o.layout.padding.right = 0;                       // el espacio lo ocupa el eje derecho
+    o.scales.y2 = {
+      position:"right", min:0, max:26,
+      grid:{drawOnChartArea:true, color:"rgba(255,159,64,.14)", lineWidth:1},
+      border:{display:false},
+      afterFit:(s)=>{ s.width = AXIS_R; },
+      afterBuildTicks:(axis)=>{ axis.ticks = PROFILES.map(p => ({value:p.mbps})); },
+      ticks:{
+        color:css("--bitrate"), font:{size:10.5},
+        callback:(v)=>{ const p = PROFILES.find(p => p.mbps === v); return p ? p.label : ""; },
+      },
+    };
+    return o; })(),
+});
+const chU = new Chart(document.getElementById("chU"), {
+  type:"line",
+  data:{datasets:[
+    {label:"u(k) — acción P+D", data:[], borderColor:css("--uk"), stepped:true},
+    {label:"Bitrate ideal (pre-cuantización)", data:[], borderColor:"rgba(231,238,249,.55)", borderDash:[3,4], borderWidth:1.5, stepped:true},
+  ]},
+  options:baseOpts("Mbps", -10, 26),
+});
+const chE = new Chart(document.getElementById("chE"), {
+  type:"line",
+  data:{datasets:[
+    {label:"Zona muerta (sup)", data:[], borderWidth:0, backgroundColor:css("--band"), fill:"+1", pointRadius:0, order:10},
+    {label:"Zona muerta (inf)", data:[], borderWidth:0, fill:false, pointRadius:0, order:10},
+    {label:"e(k) = 10 − Buffer", data:[], borderColor:css("--err"), tension:.15},
+    {label:"e = 0", data:[], borderColor:"rgba(255,255,255,.25)", borderDash:[4,4], borderWidth:1},
+  ]},
+  options:(()=>{ const o = baseOpts("segundos", -22, 12);
+    o.plugins.legend.labels.filter = it => !it.text.startsWith("Zona muerta (inf");
+    return o; })(),
+});
+const charts = [chBuf, chVel, chU, chE];
+
+function pushSample(){
+  const t = st.t;
+  chBuf.data.datasets[0].data.push({x:t, y:R + P.dz});
+  chBuf.data.datasets[1].data.push({x:t, y:R - P.dz});
+  chBuf.data.datasets[2].data.push({x:t, y:R});
+  chBuf.data.datasets[3].data.push({x:t, y:st.buffer});
+  chVel.data.datasets[0].data.push({x:t, y:throughputNow()});
+  chVel.data.datasets[1].data.push({x:t, y:PROFILES[st.profileIdx].mbps});
+  chU.data.datasets[0].data.push({x:t, y:st.u});
+  chU.data.datasets[1].data.push({x:t, y:st.bitrateIdeal});
+  chE.data.datasets[0].data.push({x:t, y:+P.dz});
+  chE.data.datasets[1].data.push({x:t, y:-P.dz});
+  chE.data.datasets[2].data.push({x:t, y:R - st.buffer});
+  chE.data.datasets[3].data.push({x:t, y:0});
+
+  // ventana deslizante alineada
+  const xMin = Math.max(0, t - WINDOW);
+  for (const ch of charts){
+    ch.options.scales.x.min = xMin;
+    ch.options.scales.x.max = Math.max(WINDOW, t);
+    for (const ds of ch.data.datasets){
+      while (ds.data.length && ds.data[0].x < xMin - 2) ds.data.shift();
+    }
+    ch.update("none");
+  }
+}
+
+/* ================= UI ================= */
+const $ = id => document.getElementById(id);
+function fmt(n,d=1){ return n.toFixed(d); }
+
+function refreshKpis(){
+  $("kT").textContent = st.t + " s";
+  $("kBuf").textContent = fmt(st.buffer) + " s";
+  $("kQ").textContent = PROFILES[st.profileIdx].label + " · " + PROFILES[st.profileIdx].mbps + " Mbps";
+  const b = $("stateBadge");
+  if (st.t < st.cpuUntil){ b.textContent = "CPU congelada"; b.className = "badge frozen"; }
+  else if (st.rebuffering){ b.textContent = "Re-buffering"; b.className = "badge rebuf"; }
+  else { b.textContent = "Reproduciendo"; b.className = "badge"; }
+  const msgs = [];
+  if (st.t < st.netUntil) msgs.push("⚡ red degradada " + (st.netUntil - st.t) + " s (−" + st.netAmp + "%)");
+  if (st.t < st.cpuUntil) msgs.push("🧊 CPU en falla " + (st.cpuUntil - st.t) + " s");
+  $("pertMsg").textContent = msgs.join("  ·  ");
+}
+
+/* sliders */
+$("sKp").oninput = e => { P.kp = +e.target.value; $("vKp").textContent = fmt(P.kp,2); };
+$("sKd").oninput = e => { P.kd = +e.target.value; $("vKd").textContent = fmt(P.kd,2); };
+$("sDz").oninput = e => { P.dz = +e.target.value; $("vDz").textContent = fmt(P.dz,2) + " s"; };
+$("sThr").oninput = e => { P.thrBase = +e.target.value; $("vThr").textContent = fmt(P.thrBase) + " Mbps"; };
+
+/* perturbaciones */
+$("btnNet").onclick = () => {
+  st.netAmp = Math.min(100, Math.max(0, +$("pAmp").value || 0));
+  st.netUntil = st.t + Math.max(1, +$("pDur").value || 1);
+  refreshKpis();
+};
+$("btnCpu").onclick = () => {
+  st.cpuUntil = st.t + Math.max(1, +$("pDur").value || 1);
+  refreshKpis();
+};
+
+/* loop de tiempo real */
+let timer = null, speed = 1;
+function tick(){ plantSecond(); pushSample(); refreshKpis(); }
+function startLoop(){ stopLoop(); timer = setInterval(tick, 1000/speed); }
+function stopLoop(){ if (timer){ clearInterval(timer); timer = null; } }
+
+$("btnStart").onclick = () => {
+  startLoop();
+  $("btnStart").disabled = true; $("btnPause").disabled = false;
+};
+$("btnPause").onclick = () => {
+  stopLoop();
+  $("btnStart").disabled = false; $("btnPause").disabled = true;
+};
+$("btnReset").onclick = () => {
+  stopLoop();
+  st = freshState();
+  for (const ch of charts){
+    for (const ds of ch.data.datasets) ds.data.length = 0;
+    ch.options.scales.x.min = 0; ch.options.scales.x.max = WINDOW;
+    ch.update("none");
+  }
+  pushSample(); refreshKpis();
+  $("btnStart").disabled = false; $("btnPause").disabled = true;
+};
+document.querySelectorAll(".speed button").forEach(b => {
+  b.onclick = () => {
+    speed = +b.dataset.s;
+    document.querySelectorAll(".speed button").forEach(x => x.classList.toggle("on", x === b));
+    if (timer) startLoop();
+  };
+});
+
+/* init */
+st = freshState();
+pushSample();
+refreshKpis();
+</script>
+</body>
+</html>
